@@ -1,0 +1,74 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>stripe.SignatureVerificationError in Python (FastAPI, Django, Flask): how to fix</title><meta name="description" content="Fix stripe.SignatureVerificationError in Python: what each message means, and working FastAPI, Django and Flask webhook handlers that verify the raw body."><link rel="canonical" href="https://5012763083a-oss.github.io/webhook-fixes/errors/stripe-signatureverificationerror-python-fastapi/">
+<style>body{font:16px/1.6 system-ui,sans-serif;max-width:760px;margin:2rem auto;padding:0 1rem}pre{background:#f4f4f4;padding:1rem;overflow:auto;font-size:13px}code{background:#f4f4f4;padding:0 .2rem}.cta{background:#eef4ff;padding:1rem;border-radius:6px;margin-top:2rem}</style></head><body><nav style="margin-bottom:1rem"><a href="/webhook-fixes/">Webhook Fixes</a> · <a href="/webhook-fixes/errors/">Errors</a> · <a href="/webhook-fixes/tools/stripe-signature/">Stripe checker</a> · <a href="/webhook-fixes/tools/email-list-cleaner/">Email cleaner</a> · <a href="/webhook-fixes/tools/screenshot-server/">Screenshots</a></nav>
+<!--
+Sources (checked Oct 9, 2026):
+- Stripe, "Resolve signature verification errors" (raw UTF-8 body, whsec_ endpoint secret, CLI vs Dashboard secret, header format, exempt webhook route from CSRF in Django): https://docs.stripe.com/webhooks/signature
+- stripe-python source, stripe/_webhook.py (construct_event / verify_header; bytes decoded as UTF-8; messages "No Stripe-Signature header value was provided...", "No webhook secret value was provided. It should start with `whsec_`", "Unable to extract timestamp and signatures from header", "No signatures found with expected scheme v1", "No signatures found matching the expected signature for payload", "Timestamp outside the tolerance zone (%d)"; DEFAULT_TOLERANCE = 300; json.loads after verification): https://github.com/stripe/stripe-python/blob/master/stripe/_webhook.py
+- stripe-python CHANGELOG: 13.0.0 (2025-09-30) removed the `stripe.error` module shim (#1603); 14.0.1 (2025-11-21) made `stripe.error` accessible again (#1684): https://github.com/stripe/stripe-python/blob/master/CHANGELOG.md
+- FastAPI, "Using the Request Directly" (data read from Request isn't validated/converted): https://fastapi.tiangolo.com/advanced/using-request-directly/
+- Starlette, Requests ("The request body as bytes: await request.body()"): https://starlette.dev/requests/
+- Django, Request and response objects (HttpRequest.body; request.headers is case-insensitive; META keys are HTTP_ + upper-case with hyphens as underscores; RawPostDataException after reading the stream): https://docs.djangoproject.com/en/5.2/ref/request-response/
+- Django, CSRF (csrf_exempt): https://docs.djangoproject.com/en/5.2/howto/csrf/
+- Verified locally with stripe-python 16.0.0 + fastapi 0.143.0 (TestClient): a dict payload or json.dumps(parsed) gives "No signatures found matching..."; swapped args give "Unable to extract..."; stripe 13.0.0 has no stripe.error, so `except stripe.error.SignatureVerificationError` raises AttributeError.
+-->
+<h1>stripe.SignatureVerificationError in Python (FastAPI, Django, Flask): how to fix</h1><p><code>stripe.Webhook.construct_event(payload, sig_header, secret)</code> raises <code>SignatureVerificationError</code> when it can't prove the request came from Stripe. The message tells you which of the three arguments is wrong:</p>
+<ul>
+<li><b><code>No signatures found matching the expected signature for payload</code></b>: the body isn't the exact bytes Stripe sent, or the secret is wrong. This is the common one; see below.</li>
+<li><b><code>No Stripe-Signature header value was provided</code></b>: <code>sig_header</code> is <code>None</code> or empty. See <a href="/webhook-fixes/errors/stripe-no-signature-header-provided/">No stripe-signature header value was provided</a>.</li>
+<li><b><code>Unable to extract timestamp and signatures from header</code></b>: the second argument isn't a <code>t=…,v1=…</code> string, often because the arguments are swapped. See <a href="/webhook-fixes/errors/stripe-unable-to-extract-timestamp-and-signatures/">that page</a>.</li>
+<li><b><code>No webhook secret value was provided. It should start with `whsec_`</code></b>: your env var didn't load.</li>
+<li><b><code>Timestamp outside the tolerance zone</code></b>: the signature is valid but older than 300 seconds (the default). See <a href="/webhook-fixes/errors/timestamp-outside-tolerance/">timestamp outside tolerance</a>.</li></ul>
+<h2>Why the body check fails in Python</h2><ol>
+<li><b>You verified parsed JSON.</b> A FastAPI parameter like <code>payload: dict</code> or a Pydantic model, <code>await request.json()</code>, Django REST Framework's <code>request.data</code>, or Flask's <code>request.json</code> all give you a parsed object. <code>json.dumps()</code> of it isn't byte-identical (whitespace and <code>\u</code> escapes differ). Python won't complain about the type; you just get “No signatures found matching…”.</li>
+<li><b>You converted bytes with <code>str()</code>.</b> <code>str(b'{...}')</code> is <code>"b'{...}'"</code>. Pass the bytes as they are (the library decodes them as UTF-8), or use <code>.decode("utf-8")</code>.</li>
+<li><b>Wrong secret.</b> Use the endpoint's <code>whsec_…</code> signing secret, not <code>sk_…</code>. <code>stripe listen</code> prints its own secret, which is different from the Dashboard endpoint's. Test and live mode endpoints have separate secrets.</li>
+<li><b>A proxy or middleware changed the body</b> before it reached your view.</li></ol>
+<h2>FastAPI</h2><pre>import os
+import stripe
+from fastapi import FastAPI, HTTPException, Request
+
+app = FastAPI()
+endpoint_secret = os.environ["STRIPE_WEBHOOK_SECRET"]   # whsec_...
+
+@app.post("/webhooks/stripe")
+async def stripe_webhook(request: Request):              # no dict / Pydantic body parameter
+    payload = await request.body()                       # raw bytes, exactly as sent
+    sig_header = request.headers.get("stripe-signature") # header lookup is case-insensitive
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, endpoint_secret)
+    except ValueError:                                   # body isn't valid JSON
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    except stripe.SignatureVerificationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if event["type"] == "checkout.session.completed":
+        ...                                              # hand off slow work; reply fast
+    return {"received": True}</pre>
+<h2>Django</h2><pre>import stripe
+from django.conf import settings
+from django.http import HttpResponse
+from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_POST
+
+@csrf_exempt                       # Stripe can't send a CSRF token
+@require_POST
+def stripe_webhook(request):
+    payload = request.body         # raw bytes; read it before anything touches request.POST / request.data
+    sig_header = request.headers.get("Stripe-Signature")   # same as request.META.get("HTTP_STRIPE_SIGNATURE")
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, settings.STRIPE_WEBHOOK_SECRET)
+    except ValueError:
+        return HttpResponse(status=400)
+    except stripe.SignatureVerificationError:
+        return HttpResponse(status=400)
+    return HttpResponse(status=200)</pre>
+<p>In Django REST Framework, verify <code>request.body</code> as above, not <code>request.data</code>. Django raises <code>RawPostDataException</code> if you read <code>request.body</code> after the request stream has already been consumed.</p>
+<h2>Flask</h2><pre>payload = request.get_data()       # raw bytes, not request.json
+sig_header = request.headers.get("Stripe-Signature")
+event = stripe.Webhook.construct_event(payload, sig_header, endpoint_secret)</pre>
+<h2><code>AttributeError: module 'stripe' has no attribute 'error'</code></h2><p>Older examples catch <code>stripe.error.SignatureVerificationError</code>. stripe-python 13.0.0 removed the <code>stripe.error</code> module, and 14.0.1 made it accessible again. On an affected version, the <code>except</code> line itself raises <code>AttributeError</code> the moment verification fails, so Stripe sees a 500 instead of a 400. Catch <code>stripe.SignatureVerificationError</code>, which works on current versions.</p>
+<p>The same causes in Node (Express and Next.js) are on <a href="/webhook-fixes/errors/no-signatures-found/">“No signatures found matching the expected signature for payload”</a>.</p>
+<div class="pbox" style="border:1px solid #c9d6ff;background:#f7f9ff;padding:.75rem 1rem;border-radius:6px;margin:1.5rem 0"><p style="margin:0 0 .25rem">Verification is only step one. The guide covers every common Stripe webhook failure with copy-paste fixes. The kit is a self-hosted Cloudflare Worker relay that verifies Stripe signatures in front of your Python app, then retries, replays or dead-letters each event instead of dropping it.</p><!--LAUNCH_CTA--></div>
+<div class="cta"><p>Free download: <a href="https://webhook-relay.gmitchell-relay.workers.dev/go/cheatsheet?ref=pages">Webhook debugging cheat sheet</a>.</p><p><b>Still failing?</b> Paste your payload, header and secret into the <a href="/webhook-fixes/tools/stripe-signature/">free Stripe signature checker</a>. It runs in your browser and tells you which cause it is.</p>
+<p>All five common causes with copy-paste fixes: <a href="https://webhook-relay.gmitchell-relay.workers.dev/go/guide?ref=pages">Fix Your Stripe Webhooks guide ($9)</a>. Retries, replay and a dead-letter list in front of your endpoint: <a href="https://webhook-relay.gmitchell-relay.workers.dev/go/kit?ref=pages">Self-Hosted Webhook Relay Kit ($19)</a>.</p></div>
+<nav class="related" style="margin:2rem 0 1rem"><h2 style="font-size:1.1rem">Related tools</h2><ul><li><a href="/webhook-fixes/tools/stripe-signature/">Free Stripe signature checker</a> (runs in your browser)</li><li><a href="/webhook-fixes/errors/">All webhook error fixes</a></li></ul></nav><footer style="margin-top:3rem;font-size:14px;color:#555">Free pages by webhookfixes · <a href="https://github.com/5012763083a-oss/webhook-fixes">Source on GitHub</a></footer></body></html>

@@ -1,0 +1,66 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Stripe webhook 400 in Next.js: "No signatures found matching the expected signature for payload"</title><meta name="description" content="Fix Stripe webhook signature failures in Next.js, including “Webhook payload must be provided as a string or a Buffer”: read the raw body with req.text() or disable bodyParser."><link rel="canonical" href="https://5012763083a-oss.github.io/webhook-fixes/errors/nextjs-stripe-webhook-signature/">
+<style>body{font:16px/1.6 system-ui,sans-serif;max-width:760px;margin:2rem auto;padding:0 1rem}pre{background:#f4f4f4;padding:1rem;overflow:auto;font-size:13px}code{background:#f4f4f4;padding:0 .2rem}.cta{background:#eef4ff;padding:1rem;border-radius:6px;margin-top:2rem}</style></head><body><nav style="margin-bottom:1rem"><a href="/webhook-fixes/">Webhook Fixes</a> · <a href="/webhook-fixes/errors/">Errors</a> · <a href="/webhook-fixes/tools/stripe-signature/">Stripe checker</a> · <a href="/webhook-fixes/tools/email-list-cleaner/">Email cleaner</a> · <a href="/webhook-fixes/tools/screenshot-server/">Screenshots</a></nav>
+<!--
+Sources (checked Oct 9, 2026):
+- stripe-node source, src/Webhooks.ts (string or Uint8Array payload; parsed object => "Webhook payload must be provided as a string or a Buffer ..."): https://github.com/stripe/stripe-node/blob/master/src/Webhooks.ts
+- Stripe, "Resolve signature verification errors" (Next.js App Router example; Pages Router: disable bodyParser): https://docs.stripe.com/webhooks/signature
+- Next.js Route Handlers (Web Request API; request.text()): https://nextjs.org/docs/app/api-reference/file-conventions/route ; Pages Router API routes bodyParser config: https://nextjs.org/docs/pages/building-your-application/routing/api-routes
+- FastAPI "Using the Request Directly": https://fastapi.tiangolo.com/advanced/using-request-directly/ ; Starlette Requests: https://starlette.dev/requests/
+- Verified locally with stripe-node 23.0.0: a parsed object and a ReadableStream (req.body) both throw the "must be provided as a string or a Buffer" message; a string or Buffer verifies.
+-->
+<h1>Stripe webhook 400 in Next.js: "No signatures found matching the expected signature for payload"</h1><p>Your Next.js route returns 400 because <code>stripe.webhooks.constructEvent()</code> threw. It throws when the body, the <code>Stripe-Signature</code> header, or the secret isn't exactly what Stripe used to sign the event. In Next.js the usual culprit is the body.</p>
+<h2>“Webhook payload must be provided as a string or a Buffer”</h2><p>If the error starts with <code>Webhook payload must be provided as a string or a Buffer (https://nodejs.org/api/buffer.html) instance representing the _raw_ request body</code>, you passed something that isn't a string, <code>Buffer</code> or <code>Uint8Array</code>. In Next.js that's usually one of these:</p><ul>
+<li><b>App Router:</b> you passed <code>await req.json()</code>, or <code>req.body</code> (a <code>ReadableStream</code>, not the text). Use <code>await req.text()</code>, or <code>Buffer.from(await req.arrayBuffer())</code>.</li>
+<li><b>Pages Router:</b> you passed <code>req.body</code> while Next.js's default body parser was on, so it's already a parsed object. Turn <code>bodyParser</code> off and read the stream, as shown below.</li></ul>
+<h2>App Router (app/api/.../route.ts)</h2><p>Read the body with <code>await req.text()</code>. Don't call <code>req.json()</code> and then <code>JSON.stringify</code> it, because the re-serialized string won't match the signed bytes.</p>
+<pre>import Stripe from 'stripe';
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+
+export async function POST(req) {
+  const body = await req.text();                 // raw body, unparsed
+  const sig = req.headers.get('stripe-signature');
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+  } catch (err) {
+    return new Response(`Webhook Error: ${err.message}`, { status: 400 });
+  }
+  // handle event.type ...
+  return new Response(null, { status: 200 });
+}</pre>
+<p>App Router route handlers don't use the <code>export const config = { api: { bodyParser: false } }</code> setting. That only applies to the Pages Router.</p>
+<h2>Pages Router (pages/api/...)</h2><p>Next.js parses the body by default here. Turn that off for the webhook route and read the stream yourself:</p>
+<pre>export const config = { api: { bodyParser: false } };
+
+async function rawBody(req) {
+  const chunks = [];
+  for await (const c of req) chunks.push(typeof c === 'string' ? Buffer.from(c) : c);
+  return Buffer.concat(chunks);
+}
+
+export default async function handler(req, res) {
+  const buf = await rawBody(req);
+  try {
+    const event = stripe.webhooks.constructEvent(buf, req.headers['stripe-signature'], process.env.STRIPE_WEBHOOK_SECRET);
+    res.status(200).end();
+  } catch (err) {
+    res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+}</pre>
+<div class="pbox" style="border:1px solid #c9d6ff;background:#f7f9ff;padding:.75rem 1rem;border-radius:6px;margin:1.5rem 0"><p style="margin:0 0 .25rem">Fixing the raw body is step one. The guide covers every common Stripe webhook failure with copy-paste fixes. The kit is a self-hosted Cloudflare Worker relay that verifies Stripe signatures, then retries, replays or dead-letters each event instead of dropping it.</p><!--LAUNCH_CTA--></div>
+<h2>Same handler in FastAPI</h2><p>If your webhook lives in a Python backend instead, the rule is the same: verify the raw bytes, not a parsed model. Python doesn't raise the “string or Buffer” error; a parsed body just fails with “No signatures found matching…”.</p><pre>@app.post("/webhooks/stripe")
+async def stripe_webhook(request: Request):
+    payload = await request.body()
+    event = stripe.Webhook.construct_event(payload, request.headers.get("stripe-signature"), endpoint_secret)</pre>
+<p>Full FastAPI and Django handlers: <a href="/webhook-fixes/errors/stripe-signatureverificationerror-python-fastapi/">stripe.SignatureVerificationError in Python</a>.</p>
+<h2>Works locally, fails on Vercel?</h2><ul>
+<li><b>Wrong secret.</b> Use the endpoint's <b>signing secret</b>, which starts with <code>whsec_</code>. It isn't the endpoint ID (<code>we_...</code>) or your API key.</li>
+<li><b>CLI secret vs dashboard secret.</b> <code>stripe listen</code> prints its own <code>whsec_</code>, and it's different from the secret on the endpoint you created in the Dashboard. Production needs the Dashboard one.</li>
+<li><b>Test vs live mode.</b> Each mode has separate endpoints and separate secrets.</li>
+<li><b>Env var not loaded.</b> Log the first few characters of the secret your deployment actually sees, and redeploy after you change env vars on your host.</li></ul>
+<p>If Stripe shows a <b>307 or 308</b> instead of a 400, the request never reached your handler. See <a href="/webhook-fixes/errors/stripe-webhook-redirect-307-308/">Stripe webhook 307/308 redirect</a>.</p>
+<p>For a walkthrough of all five causes across frameworks, read <a href="https://dev.to/gerald_mitchell_1a6a25c58/stripe-webhook-signature-verification-failed-the-5-causes-and-fixes-2aef">Stripe webhook signature verification failed: the 5 causes and fixes</a> on dev.to.</p>
+<div class="cta"><p>Free download: <a href="https://webhook-relay.gmitchell-relay.workers.dev/go/cheatsheet?ref=pages">Webhook debugging cheat sheet</a>.</p><p><b>Still failing?</b> Paste your payload, header and secret into the <a href="/webhook-fixes/tools/stripe-signature/">free Stripe signature checker</a>. It runs in your browser and tells you which cause it is.</p>
+<p>All five common causes with copy-paste fixes: <a href="https://webhook-relay.gmitchell-relay.workers.dev/go/guide?ref=pages">Fix Your Stripe Webhooks guide ($9)</a>. Retries, replay and a dead-letter list in front of your endpoint: <a href="https://webhook-relay.gmitchell-relay.workers.dev/go/kit?ref=pages">the self-hosted relay kit ($19)</a>.</p></div>
+<nav class="related" style="margin:2rem 0 1rem"><h2 style="font-size:1.1rem">Related tools</h2><ul><li><a href="/webhook-fixes/tools/stripe-signature/">Free Stripe signature checker</a> (runs in your browser)</li><li><a href="/webhook-fixes/errors/">All webhook error fixes</a></li></ul></nav><footer style="margin-top:3rem;font-size:14px;color:#555">Free pages by webhookfixes · <a href="https://github.com/5012763083a-oss/webhook-fixes">Source on GitHub</a></footer></body></html>

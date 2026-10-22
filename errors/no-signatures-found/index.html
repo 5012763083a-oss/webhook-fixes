@@ -1,0 +1,23 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Stripe: “No signatures found matching the expected signature for payload” — how to fix</title><meta name="description" content="Why Stripe webhook verification throws “No signatures found matching the expected signature for payload” and the exact fixes for Express, Next.js and Flask."><link rel="canonical" href="https://5012763083a-oss.github.io/webhook-fixes/errors/no-signatures-found/">
+<style>body{font:16px/1.6 system-ui,sans-serif;max-width:760px;margin:2rem auto;padding:0 1rem}pre{background:#f4f4f4;padding:1rem;overflow:auto;font-size:13px}code{background:#f4f4f4;padding:0 .2rem}.cta{background:#eef4ff;padding:1rem;border-radius:6px;margin-top:2rem}</style></head><body><nav style="margin-bottom:1rem"><a href="/webhook-fixes/">Webhook Fixes</a> · <a href="/webhook-fixes/errors/">Errors</a> · <a href="/webhook-fixes/tools/stripe-signature/">Stripe checker</a> · <a href="/webhook-fixes/tools/email-list-cleaner/">Email cleaner</a> · <a href="/webhook-fixes/tools/screenshot-server/">Screenshots</a></nav>
+<h1>Stripe: “No signatures found matching the expected signature for payload” — how to fix</h1><p>This error means the signature you computed from the request doesn't match the <code>v1</code> value Stripe sent. In almost every case one of these is true:</p>
+<ol><li><b>The body was parsed before verification.</b> Stripe signs the raw bytes. If <code>express.json()</code> (or a framework) parsed and re-serialized it, the bytes changed. Verify against the raw body.</li>
+<li><b>Wrong secret.</b> Use the endpoint's <code>whsec_</code> signing secret, not your <code>sk_</code> API key.</li>
+<li><b>Test vs live mode.</b> Each mode and each endpoint has its own secret; the Stripe CLI (<code>stripe listen</code>) prints yet another one.</li>
+<li><b>A proxy changed the body</b> (compression, re-encoding, trailing newline).</li></ol>
+<h2>Express</h2><pre>app.post('/webhook', express.raw({ type: 'application/json' }), (req, res) =&gt; {
+  const event = stripe.webhooks.constructEvent(req.body, req.headers['stripe-signature'], process.env.STRIPE_WEBHOOK_SECRET);
+  res.sendStatus(200);
+});</pre><p>Register this route <i>before</i> any global <code>app.use(express.json())</code>.</p>
+<h2>Next.js (App Router)</h2><pre>export async function POST(req) {
+  const body = await req.text();   // raw text, not req.json()
+  const event = stripe.webhooks.constructEvent(body, req.headers.get('stripe-signature'), process.env.STRIPE_WEBHOOK_SECRET);
+  return new Response('ok');
+}</pre>
+<h2>Flask</h2><pre>payload = request.get_data()       # raw bytes, not request.json
+event = stripe.Webhook.construct_event(payload, request.headers['Stripe-Signature'], endpoint_secret)</pre>
+<div class="pbox" style="border:1px solid #c9d6ff;background:#f7f9ff;padding:.75rem 1rem;border-radius:6px;margin:1.5rem 0"><p style="margin:0 0 .25rem">Still stuck on this error? The guide covers every common Stripe webhook failure with copy-paste fixes. The kit is a self-hosted Cloudflare Worker relay that verifies Stripe signatures, then retries, replays or dead-letters each event instead of dropping it.</p><!--LAUNCH_CTA--></div>
+<div class="cta"><p>Free download: <a href="https://webhook-relay.gmitchell-relay.workers.dev/go/cheatsheet?ref=pages">Webhook debugging cheat sheet</a>.</p><p><b>Still failing?</b> Paste your payload, header and secret into the <a href="/webhook-fixes/tools/stripe-signature/">free Stripe signature checker</a>. It runs in your browser and tells you which cause it is.</p>
+<p>All five common causes with copy-paste fixes: <a href="https://webhook-relay.gmitchell-relay.workers.dev/go/guide?ref=pages">Fix Your Stripe Webhooks guide ($9)</a>. Retries, replay and a dead-letter list in front of your endpoint: <a href="https://webhook-relay.gmitchell-relay.workers.dev/go/kit?ref=pages">the self-hosted relay kit ($19)</a>.</p></div>
+<nav class="related" style="margin:2rem 0 1rem"><h2 style="font-size:1.1rem">Related tools</h2><ul><li><a href="/webhook-fixes/tools/stripe-signature/">Free Stripe signature checker</a> (runs in your browser)</li><li><a href="/webhook-fixes/errors/">All webhook error fixes</a></li></ul></nav><footer style="margin-top:3rem;font-size:14px;color:#555">Free pages by webhookfixes · <a href="https://github.com/5012763083a-oss/webhook-fixes">Source on GitHub</a></footer></body></html>

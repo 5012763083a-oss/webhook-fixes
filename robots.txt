@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://5012763083a-oss.github.io/webhook-fixes/sitemap.xml

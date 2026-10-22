@@ -1,0 +1,38 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Free Stripe webhook signature checker: why is my Stripe-Signature failing?</title>
+<meta name="description" content="Paste a Stripe webhook payload, the Stripe-Signature header and your whsec_ secret. Runs entirely in your browser; nothing is sent to any server.">
+<style>body{font:16px/1.5 system-ui,sans-serif;max-width:760px;margin:2rem auto;padding:0 1rem}textarea,input{width:100%;font:13px monospace;box-sizing:border-box;margin:.3rem 0 1rem}textarea{height:9rem}button{font-size:1rem;padding:.5rem 1.2rem}#out{white-space:pre-wrap;padding:1rem;border-radius:6px;margin-top:1rem}.ok{background:#e6f7ea}.bad{background:#fdecea}</style><link rel="canonical" href="https://5012763083a-oss.github.io/webhook-fixes/tools/stripe-signature/">
+</head><body><nav style="margin-bottom:1rem"><a href="/webhook-fixes/">Webhook Fixes</a> · <a href="/webhook-fixes/errors/">Errors</a> · <a href="/webhook-fixes/tools/stripe-signature/">Stripe checker</a> · <a href="/webhook-fixes/tools/email-list-cleaner/">Email cleaner</a> · <a href="/webhook-fixes/tools/screenshot-server/">Screenshots</a></nav>
+<h1>Stripe webhook signature checker</h1>
+<p>Find out why Stripe signature verification is failing. <strong>Everything runs in your browser.</strong> Your secret and payload never leave this page.</p>
+<label>Raw request body (exactly as received, before any JSON parsing)</label><textarea id="body"></textarea>
+<label>Stripe-Signature header</label><input id="hdr" placeholder="t=1700000000,v1=abc...">
+<label>Endpoint signing secret</label><input id="sec" placeholder="whsec_..." type="password">
+<label><input type="checkbox" id="ignoreTime" style="width:auto"> Ignore the 5-minute timestamp check (for old test events)</label><br>
+<button id="go">Check signature</button><div id="out"></div>
+<p id="guide-upsell" hidden style="margin-top:.75rem">Still failing? The 5 causes and copy-paste fixes are in the <a href="https://webhook-relay.gmitchell-relay.workers.dev/go/guide?ref=pages">$9 guide</a>.</p>
+<p style="margin-top:2rem">Want every fix in one place? <a href="https://webhook-relay.gmitchell-relay.workers.dev/go/guide?ref=pages">Fix Your Stripe Webhooks guide ($9)</a>: the 5 common signature errors, with copy-paste fixes for Express, Next.js and Flask. Want retries and replay so you never lose an event? Get the <a href="https://webhook-relay.gmitchell-relay.workers.dev/go/kit?ref=pages">Self-Hosted Webhook Relay Kit ($19)</a>.</p>
+<p>Tired of missed webhooks? <a href="/webhook-fixes/">Never miss a Stripe payment alert</a>, with retries, replays and Discord or Sheets alerts.</p>
+<script>
+const hex=b=>[...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,"0")).join("");
+async function hmac(k,m){const key=await crypto.subtle.importKey("raw",new TextEncoder().encode(k),{name:"HMAC",hash:"SHA-256"},false,["sign"]);return hex(await crypto.subtle.sign("HMAC",key,new TextEncoder().encode(m)))}
+document.getElementById("go").onclick=async()=>{
+ const body=document.getElementById("body").value,h=document.getElementById("hdr").value.trim(),s=document.getElementById("sec").value.trim(),o=document.getElementById("out"),g=document.getElementById("guide-upsell"),tips=[];
+ const showGuide=bad=>{g.hidden=!bad};
+ let t,v1=[];for(const kv of h.split(",")){const[k,v]=kv.trim().split("=");if(k==="t")t=v;if(k==="v1")v1.push(v)}
+ if(!s.startsWith("whsec_"))tips.push("The secret should start with whsec_. Use the endpoint's signing secret, not your sk_ API key.");
+ if(!t||!v1.length){o.className="bad";o.textContent="The header is missing t= or v1=. Copy the whole Stripe-Signature header value.\n"+tips.join("\n");showGuide(true);return}
+ const exp=await hmac(s,`${t}.${body}`),match=v1.includes(exp),age=Math.round(Date.now()/1000-Number(t));
+ if(!match){
+  if(body!==body.trim())tips.push("The body has leading or trailing whitespace. Make sure you use the raw bytes.");
+  try{const j=JSON.parse(body);if(JSON.stringify(j)===body||JSON.stringify(j,null,2)===body)tips.push("The body looks re-serialized JSON. Frameworks like Express's json() parser change the bytes, so verify against the raw body (express.raw / request.get_data()).")}catch{tips.push("The body isn't valid JSON, so it may have been truncated or altered.")}
+  if(await hmac(s,`${t}.${body.replace(/\r\n/g,"\n")}`)!==exp&&v1.includes(await hmac(s,`${t}.${body.replace(/\r\n/g,"\n")}`)))tips.push("Line endings were changed (CRLF vs LF).");
+  tips.push("Check that this secret belongs to this exact endpoint and mode. Test mode and live mode have different secrets, and the Stripe CLI uses its own.");
+ }
+ const timeOk=document.getElementById("ignoreTime").checked||Math.abs(age)<=300;
+ if(match&&!timeOk)tips.push(`The timestamp is ${age}s old. Most libraries reject events older than 300s, which is the default tolerance.`);
+ const ok=match&&timeOk;o.className=ok?"ok":"bad";
+ o.textContent=(match?"✅ Signature matches.":"❌ Signature does not match.")+(match&&!timeOk?" But the timestamp is too old.":"")+"\nExpected v1: "+exp+(tips.length?"\n\nLikely causes:\n• "+tips.join("\n• "):"");
+ showGuide(!ok);
+};
+</script><footer style="margin-top:3rem;font-size:14px;color:#555">Free pages by webhookfixes · <a href="https://github.com/5012763083a-oss/webhook-fixes">Source on GitHub</a></footer></body></html>

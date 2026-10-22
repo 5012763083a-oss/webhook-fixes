@@ -1,0 +1,49 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Shopify webhook HMAC verification failing: how to fix X-Shopify-Hmac-Sha256 mismatches</title><meta name="description" content="Why your Shopify webhook HMAC check fails, covering the raw body, base64 vs hex, and the wrong secret, with working Express, Flask and FastAPI code."><link rel="canonical" href="https://5012763083a-oss.github.io/webhook-fixes/errors/shopify-hmac-verification-failed/">
+<style>body{font:16px/1.6 system-ui,sans-serif;max-width:760px;margin:2rem auto;padding:0 1rem}pre{background:#f4f4f4;padding:1rem;overflow:auto;font-size:13px}code{background:#f4f4f4;padding:0 .2rem}.cta{background:#eef4ff;padding:1rem;border-radius:6px;margin-top:2rem}</style></head><body><nav style="margin-bottom:1rem"><a href="/webhook-fixes/">Webhook Fixes</a> · <a href="/webhook-fixes/errors/">Errors</a> · <a href="/webhook-fixes/tools/stripe-signature/">Stripe checker</a> · <a href="/webhook-fixes/tools/email-list-cleaner/">Email cleaner</a> · <a href="/webhook-fixes/tools/screenshot-server/">Screenshots</a></nav>
+<!--
+Sources (checked Oct 9, 2026):
+- Shopify, "Verify webhook deliveries" (base64-encoded HMAC-SHA256 in X-Shopify-Hmac-SHA256, keyed with the app's client secret, over the raw request body; capture the raw body before any body parser; client-secret rotation can take up to an hour; five-second timeout for the whole request): https://shopify.dev/docs/apps/build/webhooks/subscribe/https
+- FastAPI, "Using the Request Directly" (data read from Request isn't validated/converted by FastAPI): https://fastapi.tiangolo.com/advanced/using-request-directly/
+- FastAPI, Header parameters (underscores converted to hyphens; headers are case-insensitive): https://fastapi.tiangolo.com/tutorial/header-params/
+- Starlette, Requests ("The request body as bytes: await request.body()"): https://starlette.dev/requests/
+- Python docs, hmac.compare_digest / base64.b64encode: https://docs.python.org/3/library/hmac.html , https://docs.python.org/3/library/base64.html
+- Verified locally with fastapi 0.143.0 TestClient: the FastAPI handler below accepts a correctly signed body and rejects a re-serialized json.dumps() body and a hexdigest.
+-->
+<h1>Shopify webhook HMAC verification failing: how to fix X-Shopify-Hmac-Sha256 mismatches</h1><p>Shopify signs each webhook with HMAC-SHA256 over the <b>raw request body</b>, using your app's secret, and sends it <b>base64-encoded</b> in the <code>X-Shopify-Hmac-Sha256</code> header. A mismatch almost always comes from one of these:</p>
+<ol><li><b>The body was parsed first.</b> Re-serialized JSON isn't byte-identical. Hash the raw bytes.</li>
+<li><b>Comparing hex to base64.</b> Shopify's header is base64. Compute <code>.digest('base64')</code>, not <code>'hex'</code>.</li>
+<li><b>Wrong secret.</b> Use the app's client secret (API secret key), not the API key or an access token. Webhooks created under Settings, Notifications in the Shopify admin are signed with the key shown on that page.</li>
+<li><b>Non-constant-time compare</b> isn't what breaks it, but you should still use <code>timingSafeEqual</code> / <code>hmac.compare_digest</code>.</li></ol>
+<h2>Express</h2><pre>app.post('/shopify', express.raw({ type: 'application/json' }), (req, res) =&gt; {
+  const digest = crypto.createHmac('sha256', process.env.SHOPIFY_SECRET).update(req.body).digest('base64');
+  const header = req.get('X-Shopify-Hmac-Sha256') || '';
+  const ok = header.length === digest.length &amp;&amp; crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(header));
+  res.sendStatus(ok ? 200 : 401);
+});</pre>
+<h2>Flask</h2><pre>digest = base64.b64encode(hmac.new(secret.encode(), request.get_data(), hashlib.sha256).digest()).decode()
+ok = hmac.compare_digest(digest, request.headers.get('X-Shopify-Hmac-Sha256', ''))</pre>
+<h2>FastAPI / Python</h2><p>The usual Python mistakes, in order:</p><ul>
+<li><b>Hashing parsed JSON.</b> A <code>payload: dict</code> or Pydantic parameter, or <code>await request.json()</code>, then <code>json.dumps(...)</code>. Python's default <code>json.dumps</code> output (spacing, <code>\u</code> escapes for non-ASCII) won't match Shopify's bytes. Hash <code>await request.body()</code>.</li>
+<li><b><code>hexdigest()</code> instead of base64.</b> The header is base64 of the raw digest: <code>base64.b64encode(mac.digest())</code>.</li>
+<li><b><code>str(body)</code>.</b> That gives <code>"b'...'"</code>. Pass the bytes straight to <code>hmac.new</code>.</li>
+<li><b>Wrong secret</b>, as above (client secret, not the API key or an access token).</li></ul>
+<pre>import base64, hashlib, hmac, json, os
+from fastapi import FastAPI, HTTPException, Request
+
+app = FastAPI()
+SHOPIFY_SECRET = os.environ["SHOPIFY_CLIENT_SECRET"].encode()
+
+@app.post("/webhooks/shopify")
+async def shopify_webhook(request: Request):            # no dict / Pydantic body parameter
+    body = await request.body()                          # raw bytes, before any parsing
+    received = request.headers.get("x-shopify-hmac-sha256", "")
+    digest = base64.b64encode(hmac.new(SHOPIFY_SECRET, body, hashlib.sha256).digest()).decode()
+    if not hmac.compare_digest(digest, received):
+        raise HTTPException(status_code=401, detail="HMAC verification failed")
+    data = json.loads(body)                              # parse only after verifying
+    return {"ok": True}</pre>
+<p>Shopify expects a 2xx within five seconds, so queue slow work instead of doing it in the handler. If deliveries aren't arriving at all, see <a href="/webhook-fixes/errors/shopify-webhook-not-firing/">Shopify webhook not firing</a>.</p>
+<div class="pbox" style="border:1px solid #c9d6ff;background:#f7f9ff;padding:.75rem 1rem;border-radius:6px;margin:1.5rem 0"><p style="margin:0 0 .25rem">The guide is Stripe-only. The kit is a self-hosted Cloudflare Worker relay that adds retries, replay and a dead-letter list in front of your endpoint. It verifies Shopify's <code>X-Shopify-Hmac-Sha256</code> out of the box. Set <code>SCHEME_&lt;ID&gt;=shopify</code>. It works the same way for Stripe, Lemon Squeezy, Paddle Billing, Square, Twilio (status callbacks) and GitHub.</p><!--LAUNCH_CTA--></div>
+<div class="cta"><p>Free download: <a href="https://webhook-relay.gmitchell-relay.workers.dev/go/cheatsheet?ref=pages">Webhook debugging cheat sheet</a>.</p><p>Fighting webhooks on more than one platform? The <a href="https://webhook-relay.gmitchell-relay.workers.dev/go/guide?ref=pages">Fix Your Stripe Webhooks guide ($9)</a> covers raw-body and signature problems in depth, and the <a href="https://webhook-relay.gmitchell-relay.workers.dev/go/kit?ref=pages">Self-Hosted Webhook Relay Kit ($19)</a> adds retries, replay and a dead-letter list in front of any endpoint.</p></div>
+<nav class="related" style="margin:2rem 0 1rem"><h2 style="font-size:1.1rem">Related tools</h2><ul><li><a href="/webhook-fixes/tools/stripe-signature/">Free Stripe signature checker</a> (runs in your browser)</li><li><a href="/webhook-fixes/errors/">All webhook error fixes</a></li></ul></nav><footer style="margin-top:3rem;font-size:14px;color:#555">Free pages by webhookfixes · <a href="https://github.com/5012763083a-oss/webhook-fixes">Source on GitHub</a></footer></body></html>

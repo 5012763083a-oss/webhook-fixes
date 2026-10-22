@@ -1,0 +1,48 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Svix webhook verification failed (Clerk, Resend): “No matching signature found” fixes</title><meta name="description" content="Why svix-signature checks fail for Clerk, Resend and other Svix webhooks: parsed JSON body, wrong whsec_ secret, missing svix-id/svix-timestamp headers, or clock skew. Node and Python fixes."><link rel="canonical" href="https://5012763083a-oss.github.io/webhook-fixes/errors/svix-webhook-verification-failed/">
+<style>body{font:16px/1.6 system-ui,sans-serif;max-width:760px;margin:2rem auto;padding:0 1rem}pre{background:#f4f4f4;padding:1rem;overflow:auto;font-size:13px}code{background:#f4f4f4;padding:0 .2rem}.cta{background:#eef4ff;padding:1rem;border-radius:6px;margin-top:2rem}</style></head><body><nav style="margin-bottom:1rem"><a href="/webhook-fixes/">Webhook Fixes</a> · <a href="/webhook-fixes/errors/">Errors</a> · <a href="/webhook-fixes/tools/stripe-signature/">Stripe checker</a> · <a href="/webhook-fixes/tools/email-list-cleaner/">Email cleaner</a> · <a href="/webhook-fixes/tools/screenshot-server/">Screenshots</a></nav>
+<!-- Sources (checked Oct 12, 2026): https://docs.svix.com/receiving/verifying-payloads/how https://docs.svix.com/receiving/verifying-payloads/how-manual https://clerk.com/docs/webhooks/sync-data https://resend.com/docs/dashboard/webhooks/verify-webhooks-requests -->
+<h1>Svix webhook verification failed (Clerk, Resend): “No matching signature found” fixes</h1><p>Clerk, Resend and many other platforms send webhooks through <b>Svix</b>. Each request carries three headers: <code>svix-id</code>, <code>svix-timestamp</code> and <code>svix-signature</code>. The signed content is <code>{svix-id}.{svix-timestamp}.{raw body}</code>. The key is your endpoint secret: drop the <code>whsec_</code> prefix and base64-decode the rest. The result is HMAC-SHA256, base64-encoded. <code>svix-signature</code> is a space-separated list like <code>v1,&lt;base64&gt; v1,&lt;base64&gt;</code> (more than one during secret rotation). If no entry matches, the Svix libraries throw <code>WebhookVerificationError: No matching signature found</code>.</p>
+<h2>Common causes</h2><ol>
+<li><b>Parsed body.</b> Verification needs the exact raw body. <code>JSON.stringify(req.body)</code> after <code>express.json()</code>, or <code>await req.json()</code> in Next.js, changes whitespace and key order. Use <code>express.raw()</code> or <code>await req.text()</code>.</li>
+<li><b>Wrong secret.</b> Each endpoint has its own signing secret (<code>whsec_...</code>), and dev and prod instances differ. Copy it from that endpoint's page in the Clerk or Resend dashboard. API keys won't work.</li>
+<li><b>Hand-rolled HMAC with the wrong key.</b> The key is the base64-decoded part after <code>whsec_</code>, not the whole string as UTF-8 text. The digest is base64, not hex.</li>
+<li><b>Headers missing.</b> Some proxies and frameworks drop or rename headers. Passing only <code>svix-signature</code> gives "Missing required headers". Pass all three.</li>
+<li><b>Timestamp too old or too new.</b> The libraries reject timestamps more than 5 minutes from your clock ("Message timestamp too old" / "too new"). Fix the server clock. Replaying an old request by hand will also fail.</li>
+<li><b>Middleware intercepts the route.</b> In Next.js with Clerk, make the webhook route public in <code>clerkMiddleware</code> so it isn't redirected or blocked before your handler runs.</li></ol>
+<h2>Node (Express, <code>svix</code> package)</h2><pre>const { Webhook } = require('svix');
+app.post('/webhooks/clerk', express.raw({ type: 'application/json' }), (req, res) =&gt; {
+  const wh = new Webhook(process.env.WEBHOOK_SECRET);              // whsec_...
+  let evt;
+  try {
+    evt = wh.verify(req.body.toString('utf8'), {
+      'svix-id': req.get('svix-id'),
+      'svix-timestamp': req.get('svix-timestamp'),
+      'svix-signature': req.get('svix-signature'),
+    });
+  } catch (err) { return res.status(400).send('invalid signature'); }
+  // evt is the parsed JSON payload; de-duplicate on svix-id
+  res.sendStatus(200);
+});</pre>
+<p>Next.js route handler: <code>const payload = await req.text();</code> then <code>wh.verify(payload, Object.fromEntries(req.headers))</code>. Clerk also ships <code>verifyWebhook(req)</code> in <code>@clerk/nextjs/webhooks</code>, which does the same check with <code>CLERK_WEBHOOK_SIGNING_SECRET</code>.</p>
+<h2>Python (FastAPI, <code>svix</code> package)</h2><pre>from fastapi import Request, HTTPException
+from svix.webhooks import Webhook, WebhookVerificationError
+
+@app.post('/webhooks/clerk')
+async def clerk_webhook(request: Request):
+    payload = await request.body()                               # raw bytes
+    try:
+        evt = Webhook(os.environ['WEBHOOK_SECRET']).verify(payload, dict(request.headers))
+    except WebhookVerificationError:
+        raise HTTPException(status_code=400, detail='invalid signature')
+    return {'ok': True}</pre>
+<h2>Without the library</h2><pre>const [id, ts, body] = [headers['svix-id'], headers['svix-timestamp'], rawBody];
+const key = Buffer.from(secret.split('_')[1], 'base64');
+const expected = crypto.createHmac('sha256', key).update(`${id}.${ts}.${body}`).digest('base64');
+const ok = headers['svix-signature'].split(' ').some(p =&gt; {
+  const s = p.split(',')[1] || '';
+  return s.length === expected.length &amp;&amp; crypto.timingSafeEqual(Buffer.from(s), Buffer.from(expected));
+});   // also reject if |now - ts| &gt; 300 s</pre>
+<div class="pbox" style="border:1px solid #c9d6ff;background:#f7f9ff;padding:.75rem 1rem;border-radius:6px;margin:1.5rem 0"><p style="margin:0 0 .25rem">The guide is Stripe-only. The kit is a self-hosted Cloudflare Worker relay that adds retries, replay and a dead-letter list in front of your endpoint. Its built-in schemes cover Stripe, Lemon Squeezy, Shopify, Paddle Billing, Square, Twilio (status callbacks) and GitHub. Svix webhooks (Clerk, Resend) aren't one of them, so you would add a small verifier like the one above.</p><!--LAUNCH_CTA--></div>
+<div class="cta"><p>Free download: <a href="https://webhook-relay.gmitchell-relay.workers.dev/go/cheatsheet?ref=pages">Webhook debugging cheat sheet</a>.</p><p>Fighting webhooks on more than one platform? The <a href="https://webhook-relay.gmitchell-relay.workers.dev/go/guide?ref=pages">Fix Your Stripe Webhooks guide ($9)</a> covers raw-body and signature problems in depth, and the <a href="https://webhook-relay.gmitchell-relay.workers.dev/go/kit?ref=pages">Self-Hosted Webhook Relay Kit ($19)</a> adds retries, replay and a dead-letter list in front of any endpoint. More fixes: <a href="/webhook-fixes/errors/">all webhook error pages</a>.</p></div>
+<nav class="related" style="margin:2rem 0 1rem"><h2 style="font-size:1.1rem">Related tools</h2><ul><li><a href="/webhook-fixes/tools/stripe-signature/">Free Stripe signature checker</a> (runs in your browser)</li><li><a href="/webhook-fixes/errors/">All webhook error fixes</a></li></ul></nav><footer style="margin-top:3rem;font-size:14px;color:#555">Free pages by webhookfixes · <a href="https://github.com/5012763083a-oss/webhook-fixes">Source on GitHub</a></footer></body></html>

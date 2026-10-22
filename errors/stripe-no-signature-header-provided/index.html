@@ -1,0 +1,57 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Stripe: “No stripe-signature header value was provided” — how to fix</title><meta name="description" content="Why Stripe says “No stripe-signature header value was provided”: header-name casing, API Gateway and Lambda, proxies, and test requests. Fixes for Express, Next.js, FastAPI and Django."><link rel="canonical" href="https://5012763083a-oss.github.io/webhook-fixes/errors/stripe-no-signature-header-provided/">
+<style>body{font:16px/1.6 system-ui,sans-serif;max-width:760px;margin:2rem auto;padding:0 1rem}pre{background:#f4f4f4;padding:1rem;overflow:auto;font-size:13px}code{background:#f4f4f4;padding:0 .2rem}.cta{background:#eef4ff;padding:1rem;border-radius:6px;margin-top:2rem}</style></head><body><nav style="margin-bottom:1rem"><a href="/webhook-fixes/">Webhook Fixes</a> · <a href="/webhook-fixes/errors/">Errors</a> · <a href="/webhook-fixes/tools/stripe-signature/">Stripe checker</a> · <a href="/webhook-fixes/tools/email-list-cleaner/">Email cleaner</a> · <a href="/webhook-fixes/tools/screenshot-server/">Screenshots</a></nav>
+<!--
+Sources (checked Oct 9, 2026):
+- Stripe, "Resolve signature verification errors" (Stripe-Signature header; AWS API Gateway + Lambda body mapping template that passes rawBody and headers; Stripe sends from fixed IPs): https://docs.stripe.com/webhooks/signature
+- stripe-node source, src/Webhooks.ts (header null or '' => "No stripe-signature header value was provided."; checked after the payload check): https://github.com/stripe/stripe-node/blob/master/src/Webhooks.ts
+- stripe-python source, stripe/_webhook.py (empty header => "No Stripe-Signature header value was provided. Read it from the incoming request's headers..."): https://github.com/stripe/stripe-python/blob/master/stripe/_webhook.py
+- Node.js docs, message.headers ("Header names are lower-cased"): https://nodejs.org/api/http.html#messageheaders
+- AWS, API Gateway HTTP API Lambda integrations, payload format ("All headernames are lowercased"): https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-develop-integrations-lambda.html
+- Django, Request and response objects (META key HTTP_STRIPE_SIGNATURE; request.headers case-insensitive): https://docs.djangoproject.com/en/5.2/ref/request-response/
+- FastAPI, Header parameters (underscores converted to hyphens; headers are case-insensitive): https://fastapi.tiangolo.com/tutorial/header-params/
+- Verified locally: stripe-node 23.0.0 (undefined or '' header => this message; with no body at all you get "No webhook payload was provided." first); stripe-node 11.0.0 and earlier report a missing header as "Unable to extract timestamp and signatures from header".
+-->
+<h1>Stripe: “No stripe-signature header value was provided” — how to fix</h1><p>Stripe's library threw before checking anything else: the header argument you passed to <code>constructEvent</code> / <code>construct_event</code> was <code>undefined</code>, <code>None</code> or an empty string. Stripe always sends a <code>Stripe-Signature</code> header on webhook deliveries, so either your code read it wrong or something between Stripe and your code didn't pass it on. (Older stripe-node versions, up to v11.0, report the same problem as <a href="/webhook-fixes/errors/stripe-unable-to-extract-timestamp-and-signatures/">“Unable to extract timestamp and signatures from header”</a>.)</p>
+<h2>Causes, most common first</h2><ol>
+<li><b>Wrong header-name casing on a plain object.</b> Node lower-cases incoming header names, so in Express <code>req.headers['Stripe-Signature']</code> is <code>undefined</code>. Use <code>req.headers['stripe-signature']</code> or <code>req.get('Stripe-Signature')</code>. In Django, <code>request.META['Stripe-Signature']</code> doesn't exist; the key is <code>HTTP_STRIPE_SIGNATURE</code>.</li>
+<li><b>AWS Lambda behind API Gateway.</b> With an HTTP API, header names in the Lambda event are lower-cased, so <code>event.headers['Stripe-Signature']</code> is missing. With a REST API <i>non-proxy</i> integration, headers only reach the function if your mapping template passes them; Stripe's docs give a template that passes <code>rawBody</code> and <code>headers</code>.</li>
+<li><b>A proxy, gateway or platform rewrite didn't forward it.</b> Some setups only forward an allowlist of headers to the backend. Log the header <i>names</i> your handler receives (for example <code>Object.keys(req.headers)</code>) on one delivery and check that <code>stripe-signature</code> is there.</li>
+<li><b>The request didn't come from Stripe.</b> A curl, Postman or browser test, an uptime monitor, or a bot hitting your URL won't have the header. Test with <code>stripe listen --forward-to …</code> and <code>stripe trigger …</code>, or <b>Resend</b> a real event from the Dashboard.</li></ol>
+<h2>Express</h2><pre>app.post('/webhook', express.raw({ type: 'application/json' }), (req, res) =&gt; {
+  const sig = req.headers['stripe-signature'];   // lower-case key (or req.get('Stripe-Signature'))
+  if (!sig) return res.status(400).send('Missing Stripe-Signature header');
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+  } catch (err) {
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+  res.sendStatus(200);
+});</pre>
+<h2>Next.js (App Router)</h2><pre>export async function POST(req) {
+  const body = await req.text();
+  const sig = req.headers.get('stripe-signature');   // Headers.get() is case-insensitive
+  if (!sig) return new Response('Missing Stripe-Signature header', { status: 400 });
+  // stripe.webhooks.constructEvent(body, sig, process.env.STRIPE_WEBHOOK_SECRET) ...
+}</pre>
+<h2>AWS Lambda (Node)</h2><pre>// Find the header whatever the casing; Stripe sends "Stripe-Signature"
+const headers = Object.fromEntries(Object.entries(event.headers || {}).map(([k, v]) =&gt; [k.toLowerCase(), v]));
+const sig = headers['stripe-signature'];
+const body = event.isBase64Encoded ? Buffer.from(event.body, 'base64') : event.body;
+const stripeEvent = stripe.webhooks.constructEvent(body, sig, process.env.STRIPE_WEBHOOK_SECRET);</pre>
+<h2>FastAPI</h2><pre>@app.post("/webhooks/stripe")
+async def stripe_webhook(request: Request):
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")   # case-insensitive
+    if not sig_header:
+        raise HTTPException(status_code=400, detail="Missing Stripe-Signature header")
+    event = stripe.Webhook.construct_event(payload, sig_header, endpoint_secret)</pre>
+<p>A FastAPI parameter <code>stripe_signature: str | None = Header(None)</code> also works, because FastAPI converts underscores to hyphens.</p>
+<h2>Django</h2><pre>sig_header = request.headers.get("Stripe-Signature")    # or request.META.get("HTTP_STRIPE_SIGNATURE")
+event = stripe.Webhook.construct_event(request.body, sig_header, settings.STRIPE_WEBHOOK_SECRET)</pre>
+<p>Once the header arrives, signature mismatches are usually a raw-body problem: see <a href="/webhook-fixes/errors/no-signatures-found/">“No signatures found matching the expected signature for payload”</a> and <a href="/webhook-fixes/errors/express-raw-body/">Express raw body</a>. Python handlers in full: <a href="/webhook-fixes/errors/stripe-signatureverificationerror-python-fastapi/">stripe.SignatureVerificationError in Python</a>.</p>
+<div class="pbox" style="border:1px solid #c9d6ff;background:#f7f9ff;padding:.75rem 1rem;border-radius:6px;margin:1.5rem 0"><p style="margin:0 0 .25rem">Header found, still failing? The guide covers every common Stripe webhook failure with copy-paste fixes. The kit is a self-hosted Cloudflare Worker relay that verifies Stripe signatures, then retries, replays or dead-letters each event instead of dropping it.</p><!--LAUNCH_CTA--></div>
+<div class="cta"><p>Free download: <a href="https://webhook-relay.gmitchell-relay.workers.dev/go/cheatsheet?ref=pages">Webhook debugging cheat sheet</a>.</p><p><b>Still failing?</b> Paste your payload, header and secret into the <a href="/webhook-fixes/tools/stripe-signature/">free Stripe signature checker</a>. It runs in your browser and tells you which cause it is.</p>
+<p>All five common causes with copy-paste fixes: <a href="https://webhook-relay.gmitchell-relay.workers.dev/go/guide?ref=pages">Fix Your Stripe Webhooks guide ($9)</a>. Retries, replay and a dead-letter list in front of your endpoint: <a href="https://webhook-relay.gmitchell-relay.workers.dev/go/kit?ref=pages">Self-Hosted Webhook Relay Kit ($19)</a>.</p></div>
+<nav class="related" style="margin:2rem 0 1rem"><h2 style="font-size:1.1rem">Related tools</h2><ul><li><a href="/webhook-fixes/tools/stripe-signature/">Free Stripe signature checker</a> (runs in your browser)</li><li><a href="/webhook-fixes/errors/">All webhook error fixes</a></li></ul></nav><footer style="margin-top:3rem;font-size:14px;color:#555">Free pages by webhookfixes · <a href="https://github.com/5012763083a-oss/webhook-fixes">Source on GitHub</a></footer></body></html>

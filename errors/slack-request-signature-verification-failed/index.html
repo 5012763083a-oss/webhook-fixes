@@ -1,0 +1,41 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Slack request signature verification failed (X-Slack-Signature): causes and fixes</title><meta name="description" content="Why X-Slack-Signature checks fail: parsed instead of raw body, wrong secret (not the Signing Secret), stale X-Slack-Request-Timestamp, or a missing v0= prefix. Node and Python fixes."><link rel="canonical" href="https://5012763083a-oss.github.io/webhook-fixes/errors/slack-request-signature-verification-failed/">
+<style>body{font:16px/1.6 system-ui,sans-serif;max-width:760px;margin:2rem auto;padding:0 1rem}pre{background:#f4f4f4;padding:1rem;overflow:auto;font-size:13px}code{background:#f4f4f4;padding:0 .2rem}.cta{background:#eef4ff;padding:1rem;border-radius:6px;margin-top:2rem}</style></head><body><nav style="margin-bottom:1rem"><a href="/webhook-fixes/">Webhook Fixes</a> · <a href="/webhook-fixes/errors/">Errors</a> · <a href="/webhook-fixes/tools/stripe-signature/">Stripe checker</a> · <a href="/webhook-fixes/tools/email-list-cleaner/">Email cleaner</a> · <a href="/webhook-fixes/tools/screenshot-server/">Screenshots</a></nav>
+<!-- Sources (checked Oct 12, 2026): https://api.slack.com/authentication/verifying-requests-from-slack https://api.slack.com/apis/events-api -->
+<h1>Slack request signature verification failed (X-Slack-Signature): causes and fixes</h1><p>Slack signs every request it sends to your app (Events API, slash commands, interactivity). It builds the base string <code>v0:{X-Slack-Request-Timestamp}:{raw request body}</code>, runs HMAC-SHA256 over it with your app's <b>Signing Secret</b>, hex-encodes the result and sends it as <code>X-Slack-Signature: v0=&lt;hex&gt;</code>. Your check fails whenever any of those three inputs differs by a single byte.</p>
+<h2>Common causes</h2><ol>
+<li><b>Parsed body instead of raw body.</b> Slash commands and interactivity payloads are <code>application/x-www-form-urlencoded</code>; events are JSON. If <code>express.json()</code>, <code>express.urlencoded()</code> or your framework parses the body first and you re-serialize it, the bytes change. Hash the raw bytes exactly as received.</li>
+<li><b>Wrong secret.</b> Use <b>Basic Information &rarr; App Credentials &rarr; Signing Secret</b>. The Client Secret, the deprecated Verification Token and bot tokens (<code>xoxb-</code>) won't work.</li>
+<li><b>Missing <code>v0=</code> prefix or wrong encoding.</b> The header is <code>v0=</code> plus a lowercase hex digest, not base64.</li>
+<li><b>Stale or mismatched timestamp.</b> Slack recommends rejecting requests whose timestamp is more than 5 minutes from your clock (replay protection). Check your server clock (NTP), and use the timestamp from the header, not your own.</li>
+<li><b>Bolt plus your own body parser.</b> Bolt's receiver verifies signatures itself and needs the raw body. Mounting a global body parser in front of Bolt's ExpressReceiver breaks verification.</li>
+<li><b>Retries look like duplicates.</b> Slack expects an HTTP 200 within 3 seconds and retries otherwise, with <code>X-Slack-Retry-Num</code> and <code>X-Slack-Retry-Reason</code>. Acknowledge first and do slow work afterwards.</li></ol>
+<h2>Node (Express)</h2><pre>const crypto = require('crypto');
+app.post('/slack/events', express.raw({ type: '*/*' }), (req, res) =&gt; {
+  const ts = req.get('X-Slack-Request-Timestamp') || '';
+  const sig = req.get('X-Slack-Signature') || '';
+  if (!/^\d+$/.test(ts) || Math.abs(Date.now() / 1000 - Number(ts)) &gt; 300) return res.sendStatus(401);
+  const base = `v0:${ts}:${req.body.toString('utf8')}`;          // req.body is a Buffer here
+  const expected = 'v0=' + crypto.createHmac('sha256', process.env.SLACK_SIGNING_SECRET).update(base).digest('hex');
+  const a = Buffer.from(expected), b = Buffer.from(sig);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return res.sendStatus(401);
+  const body = req.is('application/json') ? JSON.parse(req.body) : Object.fromEntries(new URLSearchParams(req.body.toString()));
+  if (body.type === 'url_verification') return res.json({ challenge: body.challenge });
+  res.sendStatus(200);                                              // ack within 3 s, then do the work
+});</pre>
+<p>With Bolt for JavaScript, pass <code>signingSecret</code> to <code>new App()</code> and don't add your own body parser on the same routes; Bolt verifies for you.</p>
+<h2>Python (Flask)</h2><pre>import hmac, hashlib, os, time
+from flask import request, abort
+
+def verify_slack():
+    ts = request.headers.get('X-Slack-Request-Timestamp', '')
+    sig = request.headers.get('X-Slack-Signature', '')
+    if not ts.isdigit() or abs(time.time() - int(ts)) &gt; 300: abort(401)
+    raw = request.get_data()                                      # raw bytes, read before request.form
+    base = b'v0:' + ts.encode() + b':' + raw
+    expected = 'v0=' + hmac.new(os.environ['SLACK_SIGNING_SECRET'].encode(), base, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, sig): abort(401)</pre>
+<p>The official SDK has the same check: <code>from slack_sdk.signature import SignatureVerifier</code>, then <code>SignatureVerifier(secret).is_valid_request(request.get_data(), request.headers)</code>. In FastAPI use <code>await request.body()</code> for the raw bytes.</p>
+<div class="pbox" style="border:1px solid #c9d6ff;background:#f7f9ff;padding:.75rem 1rem;border-radius:6px;margin:1.5rem 0"><p style="margin:0 0 .25rem">The guide is Stripe-only. The kit is a self-hosted Cloudflare Worker relay that adds retries, replay and a dead-letter list in front of your endpoint. Its built-in schemes cover Stripe, Lemon Squeezy, Shopify, Paddle Billing, Square, Twilio (status callbacks) and GitHub. Slack isn't one of them, so for Slack you would add a small verifier like the one above.</p><!--LAUNCH_CTA--></div>
+<div class="cta"><p>Free download: <a href="https://webhook-relay.gmitchell-relay.workers.dev/go/cheatsheet?ref=pages">Webhook debugging cheat sheet</a>.</p><p>Fighting webhooks on more than one platform? The <a href="https://webhook-relay.gmitchell-relay.workers.dev/go/guide?ref=pages">Fix Your Stripe Webhooks guide ($9)</a> covers raw-body and signature problems in depth, and the <a href="https://webhook-relay.gmitchell-relay.workers.dev/go/kit?ref=pages">Self-Hosted Webhook Relay Kit ($19)</a> adds retries, replay and a dead-letter list in front of any endpoint. More fixes: <a href="/webhook-fixes/errors/">all webhook error pages</a>.</p></div>
+<nav class="related" style="margin:2rem 0 1rem"><h2 style="font-size:1.1rem">Related tools</h2><ul><li><a href="/webhook-fixes/tools/stripe-signature/">Free Stripe signature checker</a> (runs in your browser)</li><li><a href="/webhook-fixes/errors/">All webhook error fixes</a></li></ul></nav><footer style="margin-top:3rem;font-size:14px;color:#555">Free pages by webhookfixes · <a href="https://github.com/5012763083a-oss/webhook-fixes">Source on GitHub</a></footer></body></html>

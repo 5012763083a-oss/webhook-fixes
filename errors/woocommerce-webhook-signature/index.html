@@ -1,0 +1,39 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WooCommerce webhook signature mismatch (X-WC-Webhook-Signature): causes and fixes</title><meta name="description" content="Why X-WC-Webhook-Signature doesn't match: hashing parsed JSON, hex instead of base64, wrong webhook secret, or the unsigned ping on creation. Node and Python fixes, plus auto-disabled webhooks."><link rel="canonical" href="https://5012763083a-oss.github.io/webhook-fixes/errors/woocommerce-webhook-signature/">
+<style>body{font:16px/1.6 system-ui,sans-serif;max-width:760px;margin:2rem auto;padding:0 1rem}pre{background:#f4f4f4;padding:1rem;overflow:auto;font-size:13px}code{background:#f4f4f4;padding:0 .2rem}.cta{background:#eef4ff;padding:1rem;border-radius:6px;margin-top:2rem}</style></head><body><nav style="margin-bottom:1rem"><a href="/webhook-fixes/">Webhook Fixes</a> · <a href="/webhook-fixes/errors/">Errors</a> · <a href="/webhook-fixes/tools/stripe-signature/">Stripe checker</a> · <a href="/webhook-fixes/tools/email-list-cleaner/">Email cleaner</a> · <a href="/webhook-fixes/tools/screenshot-server/">Screenshots</a></nav>
+<!-- Sources (checked Oct 12, 2026): https://woocommerce.com/document/webhooks/ https://github.com/woocommerce/woocommerce/blob/trunk/plugins/woocommerce/includes/class-wc-webhook.php -->
+<h1>WooCommerce webhook signature mismatch (X-WC-Webhook-Signature): causes and fixes</h1><p>WooCommerce signs each webhook delivery with the <b>Secret</b> you set on the webhook (WooCommerce &rarr; Settings &rarr; Advanced &rarr; Webhooks). The header <code>X-WC-Webhook-Signature</code> is the <b>base64-encoded</b> HMAC-SHA256 of the <b>raw request body</b>, keyed with that secret. Other headers tell you what arrived: <code>X-WC-Webhook-Topic</code>, <code>X-WC-Webhook-Resource</code>, <code>X-WC-Webhook-Event</code>, <code>X-WC-Webhook-ID</code>, <code>X-WC-Webhook-Delivery-ID</code> and <code>X-WC-Webhook-Source</code>.</p>
+<h2>Common causes</h2><ol>
+<li><b>Hashing parsed JSON.</b> Re-serializing the body changes escaping (WooCommerce's PHP JSON escapes slashes as <code>\/</code>) and spacing. Hash the raw bytes.</li>
+<li><b>Hex instead of base64.</b> Unlike Slack or GitHub, WooCommerce base64-encodes the digest. Compare base64 to base64.</li>
+<li><b>Wrong secret.</b> Each webhook has its own secret. Open the webhook in the admin and copy the value in the Secret field; a REST API consumer secret is a different thing.</li>
+<li><b>The creation ping.</b> When you save a new webhook, WooCommerce sends a test POST with a form body like <code>webhook_id=123</code>, not an order or product payload. Answer it with 200 instead of failing hard, or the webhook may not activate cleanly.</li>
+<li><b>Webhook got disabled.</b> After repeated failed deliveries (5 by default, via the <code>woocommerce_max_webhook_delivery_failures</code> filter) WooCommerce sets the webhook status to Disabled. Fix the endpoint, then set it back to Active. Check WooCommerce &rarr; Status &rarr; Logs for the delivery log.</li>
+<li><b>Deliveries are queued.</b> Webhooks are sent through Action Scheduler. If WP-Cron doesn't run (low-traffic site, <code>DISABLE_WP_CRON</code>), deliveries arrive late or not at all. Check Tools &rarr; Scheduled Actions for pending <code>woocommerce_deliver_webhook_async</code> actions.</li></ol>
+<h2>Node (Express)</h2><pre>const crypto = require('crypto');
+app.post('/webhooks/woocommerce', express.raw({ type: '*/*' }), (req, res) =&gt; {
+  const sig = req.get('X-WC-Webhook-Signature');
+  if (!sig) return res.sendStatus(200);                           // creation ping (webhook_id=...) - nothing to do
+  const expected = crypto.createHmac('sha256', process.env.WC_WEBHOOK_SECRET).update(req.body).digest('base64');
+  const a = Buffer.from(expected), b = Buffer.from(sig);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return res.sendStatus(401);
+  const topic = req.get('X-WC-Webhook-Topic');                    // e.g. order.created
+  const data = JSON.parse(req.body.toString('utf8'));
+  res.sendStatus(200);
+});</pre>
+<h2>Python (Flask)</h2><pre>import base64, hashlib, hmac, os
+from flask import request, abort
+
+@app.post('/webhooks/woocommerce')
+def woo():
+    sig = request.headers.get('X-WC-Webhook-Signature')
+    if not sig: return '', 200                                   # creation ping
+    raw = request.get_data()                                     # raw bytes
+    expected = base64.b64encode(hmac.new(os.environ['WC_WEBHOOK_SECRET'].encode(), raw, hashlib.sha256).digest()).decode()
+    if not hmac.compare_digest(expected, sig): abort(401)
+    data = request.get_json()
+    return '', 200</pre>
+<p>In FastAPI use <code>raw = await request.body()</code>. Only skip verification for a request with no signature header if you also ignore its contents; never process an order from an unsigned request.</p>
+<div class="pbox" style="border:1px solid #c9d6ff;background:#f7f9ff;padding:.75rem 1rem;border-radius:6px;margin:1.5rem 0"><p style="margin:0 0 .25rem">The guide is Stripe-only. The kit is a self-hosted Cloudflare Worker relay that adds retries, replay and a dead-letter list in front of your endpoint. Its built-in schemes cover Stripe, Lemon Squeezy, Shopify, Paddle Billing, Square, Twilio (status callbacks) and GitHub. WooCommerce isn't one of them, so you would add a small verifier like the one above.</p><!--LAUNCH_CTA--></div>
+<div class="cta"><p>Free download: <a href="https://webhook-relay.gmitchell-relay.workers.dev/go/cheatsheet?ref=pages">Webhook debugging cheat sheet</a>.</p><p>Fighting webhooks on more than one platform? The <a href="https://webhook-relay.gmitchell-relay.workers.dev/go/guide?ref=pages">Fix Your Stripe Webhooks guide ($9)</a> covers raw-body and signature problems in depth, and the <a href="https://webhook-relay.gmitchell-relay.workers.dev/go/kit?ref=pages">Self-Hosted Webhook Relay Kit ($19)</a> adds retries, replay and a dead-letter list in front of any endpoint. More fixes: <a href="/webhook-fixes/errors/">all webhook error pages</a>.</p></div>
+<nav class="related" style="margin:2rem 0 1rem"><h2 style="font-size:1.1rem">Related tools</h2><ul><li><a href="/webhook-fixes/tools/stripe-signature/">Free Stripe signature checker</a> (runs in your browser)</li><li><a href="/webhook-fixes/errors/">All webhook error fixes</a></li></ul></nav><footer style="margin-top:3rem;font-size:14px;color:#555">Free pages by webhookfixes · <a href="https://github.com/5012763083a-oss/webhook-fixes">Source on GitHub</a></footer></body></html>
