@@ -1,0 +1,17 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Response to preflight request doesn't pass access control check: fix</title><meta name="description" content="Fix the CORS preflight error: OPTIONS returns 401, 403, 404 or 405, or lacks CORS headers. Answer OPTIONS with 204 before auth."><link rel="canonical" href="https://5012763083a-oss.github.io/webhook-fixes/cors/preflight-does-not-pass-access-control-check/">
+<style>body{font:16px/1.6 system-ui,sans-serif;max-width:760px;margin:2rem auto;padding:0 1rem}pre{background:#f4f4f4;padding:1rem;overflow:auto;font-size:13px}code{background:#f4f4f4;padding:0 .2rem}.cta{background:#eef4ff;padding:1rem;border-radius:6px;margin-top:2rem}</style></head><body><nav style="margin-bottom:1rem"><a href="/webhook-fixes/">Webhook Fixes</a> · <a href="/webhook-fixes/errors/">Errors</a> · <a href="/webhook-fixes/cors/">CORS errors</a> · <a href="/webhook-fixes/tools/stripe-signature/">Stripe checker</a> · <a href="/webhook-fixes/tools/email-list-cleaner/">Email cleaner</a> · <a href="/webhook-fixes/tools/screenshot-server/">Screenshots</a></nav>
+<h1>Response to preflight request doesn't pass access control check</h1>
+<p>Before a non-simple request (JSON body, <code>Authorization</code> header, PUT/PATCH/DELETE), the browser sends an <code>OPTIONS</code> preflight. This error means that preflight failed. The rest of the message says why:</p>
+<ul><li><strong>"It does not have HTTP ok status"</strong>: OPTIONS returned 401/403/404/405/500. Preflights never carry cookies or the Authorization header, so auth middleware rejects them.</li><li><strong>"No 'Access-Control-Allow-Origin' header is present"</strong>: the OPTIONS response has no CORS headers.</li><li><strong>"Redirect is not allowed"</strong>: see <a href="/webhook-fixes/cors/redirect-not-allowed-for-preflight/">redirect on preflight</a>.</li></ul>
+<h2>Check</h2><pre>curl -si -X OPTIONS https://api.example.com/x \
+  -H "Origin: https://app.example.com" \
+  -H "Access-Control-Request-Method: PUT" \
+  -H "Access-Control-Request-Headers: content-type,authorization"</pre>
+<h2>Fix</h2><p>Answer OPTIONS with <code>204</code> <em>before</em> authentication, CSRF and routing, with:</p><pre>Access-Control-Allow-Origin: https://app.example.com
+Access-Control-Allow-Methods: GET, POST, PUT, DELETE
+Access-Control-Allow-Headers: Content-Type, Authorization
+Access-Control-Max-Age: 600
+Vary: Origin</pre>
+<h2>Reference</h2><p><a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CORS">MDN: Cross-Origin Resource Sharing</a></p><p><small>Independent pages, not affiliated with or endorsed by any vendor mentioned.</small></p>
+<nav class="related" style="margin:2rem 0 1rem"><h2 style="font-size:1.1rem">Related</h2><ul><li><a href="/webhook-fixes/cors/">All CORS error fixes</a></li></ul></nav><footer style="margin-top:3rem;font-size:14px;color:#555">Free pages by webhookfixes · <a href="https://github.com/5012763083a-oss/webhook-fixes">Source on GitHub</a></footer></body></html>

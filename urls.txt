@@ -21,6 +21,13 @@ https://5012763083a-oss.github.io/webhook-fixes/errors/svix-webhook-verification
 https://5012763083a-oss.github.io/webhook-fixes/errors/timestamp-outside-tolerance/
 https://5012763083a-oss.github.io/webhook-fixes/errors/twilio-webhook-signature/
 https://5012763083a-oss.github.io/webhook-fixes/errors/woocommerce-webhook-signature/
+https://5012763083a-oss.github.io/webhook-fixes/cors/header-not-allowed-by-access-control-allow-headers/
+https://5012763083a-oss.github.io/webhook-fixes/cors/method-not-allowed-by-access-control-allow-methods/
+https://5012763083a-oss.github.io/webhook-fixes/cors/no-access-control-allow-origin/
+https://5012763083a-oss.github.io/webhook-fixes/cors/preflight-does-not-pass-access-control-check/
+https://5012763083a-oss.github.io/webhook-fixes/cors/redirect-not-allowed-for-preflight/
+https://5012763083a-oss.github.io/webhook-fixes/cors/wildcard-with-credentials/
+https://5012763083a-oss.github.io/webhook-fixes/cors/
 https://5012763083a-oss.github.io/webhook-fixes/tools/stripe-signature/
 https://5012763083a-oss.github.io/webhook-fixes/errors/
 https://5012763083a-oss.github.io/webhook-fixes/
