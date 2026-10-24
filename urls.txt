@@ -2,6 +2,7 @@ https://5012763083a-oss.github.io/webhook-fixes/errors/express-raw-body/
 https://5012763083a-oss.github.io/webhook-fixes/errors/github-webhook-signature-mismatch/
 https://5012763083a-oss.github.io/webhook-fixes/errors/gumroad-ping-not-received/
 https://5012763083a-oss.github.io/webhook-fixes/errors/lemon-squeezy-webhook-signature/
+https://5012763083a-oss.github.io/webhook-fixes/errors/mcp-server-not-connecting/
 https://5012763083a-oss.github.io/webhook-fixes/errors/nextjs-stripe-webhook-signature/
 https://5012763083a-oss.github.io/webhook-fixes/errors/no-signatures-found/
 https://5012763083a-oss.github.io/webhook-fixes/errors/paddle-webhook-signature/
